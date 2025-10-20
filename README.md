@@ -349,4 +349,198 @@
       checkAchievements(); renderAll(); save();
     }
 
-    // Effects
+    // Effects applying
+    function applyNodeEffects(n){
+      // Effects are small bonuses; we store them on node
+      n.effects.forEach(e=>{
+        // For simplicity, attach to node as realizedEffect
+        n.realized = n.realized || {};
+        if(e.type==='manaPerSec'){
+          n.realized.manaPerSec = (n.realized.manaPerSec||0) + e.value;
+        } else if(e.type==='skillGain'){
+          n.realized.skillGain = (n.realized.skillGain||0) + (e.value||0);
+        } else if(e.type==='prestige'){
+          n.realized.prestige = (n.realized.prestige||0) + e.value;
+        }
+      });
+    }
+
+    // ---------------------- Tick loop & progression ----------------
+    function gameTick(dt){
+      // mana generation from all unlocked nodes
+      let manaGain = 0;
+      state.nodesData.forEach(n=>{
+        if(n.unlocked && n.realized && n.realized.manaPerSec){
+          manaGain += n.realized.manaPerSec * (dt/1000);
+        }
+      });
+      // base passive
+      manaGain += 0.5 * (dt/1000);
+      state.mana += manaGain;
+
+      // skill point generation from special nodes
+      // chance to gain skill points slowly
+      if(Math.random() < 0.002 * (dt/1000 + 0.001)){
+        state.skillPoints += 1; log('Gained 1 Skill Point (passive).');
+      }
+
+      // quests progress
+      state.quests.forEach(q=>{ q.progress += (dt/1000) * q.rate; if(q.progress>=q.goal && !q.completed){ q.completed=true; grantQuestReward(q); log(`Quest complete: ${q.title}`);} });
+
+      // micro achievements check
+      checkAchievements();
+
+      renderAll();
+    }
+
+    // ---------------------- UI Render -------------------------------
+    function renderAll(){
+      manaEl.textContent = Math.floor(state.mana);
+      skillEl.textContent = Math.floor(state.skillPoints);
+      prestigeEl.textContent = state.prestige;
+      classBadge.textContent = 'Class: '+state.class;
+      qs('#tickRange').value = state.tick; qs('#tickLabel').textContent = state.tick+'ms';
+
+      // upgrade list (some helper actions we provide as pseudo-upgrades)
+      upgradeList.innerHTML = '';
+      const upgrades = [
+        {id:'autotoggle',title:'Toggle Auto Tick',desc:'Runs the game automatically',costSP:0,action:()=>{state.auto=!state.auto; qs('#autoStatus').textContent = state.auto? 'On':'Off';}},
+        {id:'prestige',title:'Prestige (reset for rewards)',desc:'Reset nodes for permanent prestige',costSP:0,action:()=>{if(state.mana<1000){log('Need 1000 mana to prestige.');return;} state.prestige+=1; resetTree(true); log('Prestiged.');}},
+        {id:'export',title:'Export Save',desc:'Download your save as text',costSP:0,action:exportSave},
+      ];
+      upgrades.forEach(u=>{ const div = document.createElement('div'); div.className='upgrade-row'; div.innerHTML=`<div><div style="font-weight:700">${u.title}</div><div class="small">${u.desc}</div></div><div><button class="btn" data-id="${u.id}">Use</button></div>`; upgradeList.appendChild(div); div.querySelector('button').addEventListener('click',u.action); });
+
+      // quests
+      questsEl.innerHTML = '';
+      state.quests.forEach(q=>{
+        const d = document.createElement('div'); d.className='small'; d.innerHTML = `<div style="display:flex;justify-content:space-between"><div>${q.title}</div><div>${Math.floor(q.progress)}/${q.goal}</div></div>`; questsEl.appendChild(d);
+      });
+
+      // stats
+      statsArea.innerHTML = `<div class="small">Nodes unlocked: ${state.unlocked.size}/${state.nodesData.length}</div><div class="small">Tick: ${state.tick}ms</div>`;
+
+      // achievements
+      achGrid.innerHTML = ''; Object.keys(state.achievements).forEach(k=>{ const a = state.achievements[k]; const div = document.createElement('div'); div.className='ach'; div.innerHTML=`<div style="font-weight:700">${a.title}</div><div class="small">${a.desc}</div>`; achGrid.appendChild(div); });
+
+      renderTree();
+    }
+
+    // ---------------------- Quests & Achievements -------------------
+    function spawnQuest(){
+      const q = {id:'q-'+Date.now(),title:'Gathering Burst',desc:'Accumulate mana quickly',progress:0,goal:rand(100,800),rate:rand(10,40)};
+      state.quests.push(q); if(state.quests.length>3) state.quests.shift();
+    }
+    function grantQuestReward(q){
+      state.mana += q.goal*0.2; state.skillPoints += 1;
+    }
+
+    function checkAchievements(){
+      // simple ones
+      if(state.unlocked.size>=1 && !state.achievements['first']) state.achievements['first']={title:'First Bloom',desc:'Unlocked your first node.'};
+      if(state.unlocked.size>=5 && !state.achievements['collector']) state.achievements['collector']={title:'Collector',desc:'Unlocked 5 nodes.'};
+      if(state.mana>=10000 && !state.achievements['rich']) state.achievements['rich']={title:'Riches',desc:'Hold 10,000 mana.'};
+    }
+
+    // ---------------------- Logging & helper ------------------------
+    function log(msg){ const p = document.createElement('p'); p.textContent = `[${new Date().toLocaleTimeString()}] ${msg}`; logEl.prepend(p); }
+
+    // ---------------------- Save / Load -----------------------------
+    function save(){ localStorage.setItem('empyrSave', JSON.stringify(serializeState())); state.lastSave=Date.now(); }
+    function serializeState(){
+      return {
+        mana: state.mana,
+        skillPoints: state.skillPoints,
+        prestige: state.prestige,
+        class: state.class,
+        tick: state.tick,
+        nodes: state.nodesData.map(n=>({id:n.id,unlocked:n.unlocked})),
+        quests: state.quests,
+        achievements: state.achievements,
+        lastSave: state.lastSave
+      };
+    }
+    function load(){
+      const raw = localStorage.getItem('empyrSave');
+      if(!raw) return false;
+      try{
+        const s = JSON.parse(raw);
+        state.mana = s.mana||state.mana; state.skillPoints = s.skillPoints||state.skillPoints; state.prestige = s.prestige||state.prestige; state.class = s.class||state.class; state.tick = s.tick||state.tick;
+        if(s.nodes){ s.nodes.forEach(nv=>{ if(state.nodes[nv.id]) state.nodes[nv.id].unlocked = nv.unlocked; if(nv.unlocked) state.unlocked.add(nv.id); }); }
+        state.quests = s.quests||[]; state.achievements = s.achievements||{};
+        renderAll();
+        return true;
+      }catch(e){console.warn('Failed load',e); return false}
+    }
+
+    function exportSave(){ const s = JSON.stringify(serializeState()); const blob = new Blob([s],{type:'application/json'}); const url = URL.createObjectURL(blob); const a = document.createElement('a'); a.href = url; a.download = 'empyr_save_'+Date.now()+'.json'; a.click(); URL.revokeObjectURL(url); }
+    function importSave(){ const input = document.createElement('input'); input.type='file'; input.accept='application/json'; input.onchange = ()=>{ const f = input.files[0]; if(!f) return; const reader = new FileReader(); reader.onload = e=>{ try{ const s = JSON.parse(e.target.result); localStorage.setItem('empyrSave', JSON.stringify(s)); location.reload(); }catch(err){alert('Bad save file');}}; reader.readAsText(f); }; input.click(); }
+
+    // ---------------------- Reset & Prestige ------------------------
+    function resetTree(skipConfirm){ if(!skipConfirm && !confirm('Reset tree? This will cost progress.')) return; state.nodesData.forEach(n=>{ n.unlocked=false; if(state.nodes[n.id]) state.nodes[n.id].unlocked=false; }); state.unlocked.clear(); state.skillPoints = Math.max(0,state.skillPoints); state.mana = 0; save(); renderAll(); }
+
+    // ---------------------- Preview & UI extras ---------------------
+    function previewNode(n){ alert(`Preview: ${n.title}\n\n${n.desc}\n\nEffects:\n${n.effects.map(e=>JSON.stringify(e)).join('\n')}`); }
+
+    // small helper to reset and regen tree on prestige
+    function resetTreeFull(){ generateTree(); renderAll(); save(); }
+
+    // ---------------------- Initialization --------------------------
+    function init(){
+      generateTree();
+      // small default unlock
+      state.nodesData[0].unlocked=true; state.nodes[state.nodesData[0].id].unlocked=true; state.unlocked.add(state.nodesData[0].id); applyNodeEffects(state.nodesData[0]);
+      // event binds
+      qs('#tickRange').addEventListener('input',e=>{ state.tick = Number(e.target.value); qs('#tickLabel').textContent = state.tick+'ms'; save(); });
+      qs('#gainMana').addEventListener('click',()=>{ state.mana += 100; renderAll(); save(); });
+      qs('#exportBtn').addEventListener('click',exportSave);
+      qs('#importBtn').addEventListener('click',importSave);
+      qs('#resetBtn').addEventListener('click',()=>{ if(confirm('Really reset everything?')){ localStorage.removeItem('empyrSave'); location.reload(); } });
+
+      // import & start
+      const loaded = load();
+      if(!loaded) save();
+
+      // spawn a few quests
+      spawnQuest(); spawnQuest();
+
+      renderAll();
+
+      // main loop
+      let last = Date.now();
+      function loop(){
+        const now = Date.now(); const dt = now-last; last = now;
+        if(state.auto) gameTick(dt);
+        requestAnimationFrame(loop);
+      }
+      loop();
+
+      // auto tick separate (for user-controlled tick)
+      setInterval(()=>{ if(!state.auto) return; gameTick(state.tick); save(); }, state.tick);
+
+      // autosave
+      setInterval(()=>{ save(); }, 10000);
+
+      // offline estimation
+      window.addEventListener('focus',()=>{ const lastSave = state.lastSave || Date.now(); const elapsed = Date.now() - lastSave; if(elapsed > 5000){ const secs = Math.floor(elapsed/1000); const estGain = secs * 0.5; state.mana += estGain; log(`Offline: estimated ${Math.floor(estGain)} mana gained over ${Math.floor(secs)}s.`); renderAll(); } });
+    }
+
+    // ---------------------- Misc goodies ----------------------------
+    // keyboard shortcuts
+    window.addEventListener('keydown', (e)=>{
+      if(e.key==='p'){ state.auto=!state.auto; qs('#autoStatus').textContent = state.auto? 'On':'Off'; save(); }
+      if(e.key==='s' && (e.ctrlKey||e.metaKey)){ e.preventDefault(); save(); log('Game saved (hotkey).'); }
+      if(e.key==='u'){ // quick unlock cheapest node
+        const locked = state.nodesData.filter(n=>!n.unlocked && prereqsUnlocked(n));
+        if(locked.length){ const cheapest = locked.reduce((a,b)=> a.costSP < b.costSP ? a : b); tryUnlock(cheapest.id); }
+      }
+    });
+
+    // small initial call
+    init();
+
+    // make sure render updates if user clicks somewhere on svg to reposition tooltip on mobile
+    treeSvg.addEventListener('mousemove', (e)=>{ if(tooltip.style.display==='block') positionTooltip(e.clientX,e.clientY); });
+
+  </script>
+</body>
+</html>
